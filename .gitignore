@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+runtime
+source/
+wheels/
+*.log
+test-results/
+model-path.txt
+model-revision.json
+installed-requirements.txt
+upstream.patch

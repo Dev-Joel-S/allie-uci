@@ -1,0 +1,31 @@
+Allie 2.0 / NixOS / En Croissant
+================================
+EXPERIMENTELL. Hier nicht laufzeitgetestet.
+
+1. ZIP entpacken.
+2. Im entpackten Verzeichnis: bash install.sh
+   Gewichte: etwa 11 GB Download, zusätzlich Abhängigkeiten.
+3. Start im Terminal: bash start.sh
+4. Vollständiger Partietest: bash start.sh --game
+
+En Croissant: Als Engine die vom Installer ausgegebene Datei
+~/.local/share/allie-uci-0aace9ab/allie-uci auswählen.
+Nicht das Installationsskript auswählen.
+BaseTime auf die ANFÄNGLICHEN Sekunden pro Seite einstellen.
+
+Dateien:
+install.sh      Installation und Modell-/UCI-Tests
+start.sh        Start nach der Installation
+engine.py       Adapter-Code
+test.py         Tests und vollständige Partie gegen Stockfish
+build.sh        Download und Bau inklusive Rust-Abbruchpatch
+environment.nix NixOS/FHS-Umgebung
+run.sh          Aufruf innerhalb der Laufzeitumgebung
+README.txt      Technische Grenzen und Teststatus
+
+Nur normale Partien ab Anfangsstellung mit voller Zugfolge.
+Beliebige FEN, Chess960, depth/mate/searchmoves nicht unterstützt.
+Weitere Grenzen stehen in README.txt.
+
+Eigenes Installationsziel: bash install.sh /absoluter/pfad
+Danach zum Start ALLIE_UCI_HOME=/absoluter/pfad bash start.sh
