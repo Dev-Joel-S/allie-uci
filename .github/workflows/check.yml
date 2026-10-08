@@ -1,0 +1,31 @@
+name: Combined scripts check
+on: [push]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Dependencies and syntax
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup default 1.89.0
+          python -m pip install uv maturin
+          python -m venv .venv
+          uv pip install --python .venv/bin/python numpy chess
+          .venv/bin/python -m py_compile engine.py
+          bash -n install.sh start.sh
+      - name: Build Rust and validate native interface
+        run: bash install.sh --inside "$PWD" --native-only
+      - name: Integrated parser tests
+        run: bash start.sh --inside "$PWD" --unit
+      - name: Import from a different directory
+        run: |
+          ROOT="$PWD"
+          cd /tmp
+          PYTHONPATH="$ROOT/python-packages:$ROOT" "$ROOT/.venv/bin/python" -c 'from engine import check_backend; check_backend()'
