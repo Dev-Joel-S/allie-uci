@@ -166,3 +166,34 @@ Ein einzelner Modelllauf, Speicherallokation, Modellladen oder das Einlesen eine
 - Der angewandte Rust-Abbruchpatch wird als `upstream.patch` gespeichert.
 
 Die Quellen und Gewichte verbleiben bei ihren ursprünglichen Lizenzbedingungen. Dieses Repository lädt Allie bei der Installation herunter und enthält keine Modellgewichte.
+
+## Rust-Modul reparieren
+
+Bei `No module named allie_fast` oder einer inkompatiblen Rust-Schnittstelle:
+Aktuelles Repository herunterladen oder mit `git pull` aktualisieren, dann im
+Repository-Ordner ausführen:
+
+```sh
+chmod +x repair.sh
+./repair.sh "$HOME/.local/share/allie-uci-0aace9ab"
+```
+
+Das baut das gepinnte Rust-Modul erneut und installiert es in
+`python-packages`. Startskript und Testprozesse verwenden denselben expliziten
+Importpfad. Vor dem Modelldownload werden Modulpfad, INTERFACE=2 und alle
+benötigten Symbole einschließlich des Stop-Patches geprüft. Bestehende Gewichte
+werden weiterverwendet. Der Reparaturlauf führt anschließend die echten
+Modell/UCI-Tests aus und bricht bei Fehlern ab.
+
+```sh
+"$HOME/.local/share/allie-uci-0aace9ab/allie-uci" --diagnose
+```
+
+`--diagnose` prüft nur die native Erweiterung; es beweist keine funktionierende
+Modellinferenz. Das Modul `allie_fast` exportiert kein `fast`: Dieses Attribut
+gehört zu Allies Modellinstanz. Ein Fehler dazu benötigt den vollständigen
+Traceback; dieser wird jetzt in `test-results/stderr.log` gespeichert.
+
+Die CI baut die echte Rust-Erweiterung unter Linux und prüft Import, Stop-Patch
+und Parser. NixOS, En Croissant und eine vollständige Partie mit Modellgewichten
+müssen weiterhin auf dem Zielsystem getestet werden.

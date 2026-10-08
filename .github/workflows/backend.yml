@@ -1,0 +1,42 @@
+name: Native backend regression
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Set up build environment
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup default 1.89.0
+          python -m pip install uv maturin
+          python -m venv .venv
+          uv pip install --python .venv/bin/python numpy chess
+          git init source
+          git -C source remote add origin https://github.com/y0mingzhang/allie.git
+          git -C source fetch --depth 1 origin 0aace9abefbd75a24e3a1fd37e9dd1d3f992435b
+          git -C source checkout --detach FETCH_HEAD
+      - name: Python and shell syntax
+        run: |
+          .venv/bin/python -m py_compile engine.py test.py backend_check.py patch-backend.py
+          bash -n build.sh install.sh install-backend.sh repair.sh run.sh
+      - name: Compile and check actual Rust extension
+        run: bash install-backend.sh
+      - name: Verify idempotent patch
+        run: |
+          sha256sum source/rust/allie-fast/src/lib.rs source/rust/allie-fast/src/search/kl.rs > before.sha
+          .venv/bin/python patch-backend.py
+          sha256sum --check before.sha
+      - name: Parser regressions
+        run: bash run.sh --unit
+      - name: Import from another working directory
+        run: |
+          ROOT="$PWD"
+          cd /tmp
+          bash "$ROOT/run.sh" --diagnose

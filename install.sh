@@ -12,7 +12,9 @@ ROOT="$(cd "$ROOT" && pwd -P)"
 trap 'echo "Installation failed. Files and logs remain in: $ROOT" >&2' ERR
 cp -- "$PACKAGE_DIR/environment.nix" "$ROOT/environment.nix"
 nix-build "$ROOT/environment.nix" -o "$ROOT/runtime"
-cp -- "$PACKAGE_DIR/build.sh" "$ROOT/build.sh"
+for FILE in build.sh install-backend.sh patch-backend.py backend_check.py; do
+  cp -- "$PACKAGE_DIR/$FILE" "$ROOT/$FILE"
+done
 
 cp -- "$PACKAGE_DIR/engine.py" "$ROOT/engine.py"
 

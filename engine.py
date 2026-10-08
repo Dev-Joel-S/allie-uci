@@ -1,6 +1,7 @@
 """Experimental UCI bridge. The normal backend is exclusively Allie's Rust calibrated search."""
 import os
 import sys
+import traceback
 import threading
 import time
 from pathlib import Path
@@ -86,6 +87,8 @@ class Adapter:
     def load(self):
         if self.engine is not None:
             return
+        from backend_check import check_backend
+        check_backend()
         import torch
         import allie_fast
         from allie.lichess.model import Model
@@ -110,7 +113,7 @@ class Adapter:
     def cancel(self, wait=True):
         self.stop.set()
         lib = sys.modules.get("allie_fast")
-        if lib is not None:
+        if lib is not None and hasattr(lib, "uci_stop"):
             lib.uci_stop(True)
         if wait and self.thread:
             self.thread.join()
@@ -131,6 +134,8 @@ class Adapter:
         try:
             self.search(values, flags)
         except Exception as exc:
+            traceback.print_exc(file=sys.stderr)
+            sys.stderr.flush()
             send("info string ERROR " + str(exc))
             # A model/backend failure is not a chess move or resignation.
             os._exit(1)
@@ -285,6 +290,8 @@ class Adapter:
                     break
                 # debug, register and unknown optional commands are ignored.
             except Exception as exc:
+                traceback.print_exc(file=sys.stderr)
+                sys.stderr.flush()
                 send("info string ERROR " + str(exc))
                 # Never play from an old position after rejecting a go command.
                 if cmd in {"go", "isready"}:

@@ -107,14 +107,18 @@ else:
     threading.Thread(target=reader, daemon=True).start()
     def send(s):
         transcript.write("> " + s + "\n")
-        p.stdin.write(s + "\n")
-        p.stdin.flush()
+        try:
+            p.stdin.write(s + "\n")
+            p.stdin.flush()
+        except BrokenPipeError as exc:
+            raise AssertionError(f"Engine pipe closed; see {REPORT / 'stderr.log'}") from exc
     def until(prefix, timeout=120):
         lines, end = [], time.monotonic() + timeout
         while True:
             line = q.get(timeout=max(0.01, end - time.monotonic()))
             if line is None:
-                raise AssertionError("Engine exited; see stderr.log")
+                raise AssertionError(f"Engine exited (code={p.poll()}); received={lines}; "
+                                     f"see {REPORT / 'stderr.log'}")
             transcript.write("< " + line + "\n")
             lines.append(line)
             if line.startswith(prefix):
