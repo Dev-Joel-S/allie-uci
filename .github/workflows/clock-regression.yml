@@ -11,12 +11,17 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install chess
-      - name: Prepare actual-source clock regression
+      - name: Prepare exact released GUI source
         run: |
-          python - <<'PY'
-          import ast, pathlib, textwrap, urllib.request
+          mkdir -p gui-check/src-tauri/src
+          curl -fL https://raw.githubusercontent.com/franciscoBSalgueiro/en-croissant/v0.15.1/src-tauri/src/game.rs -o gui-check/src-tauri/src/game.rs
+          git apply --check --directory=gui-check ideas/en-croissant-clock.patch
+      - name: Prepare regression harness
+        run: |
+          cat > clock_check.py <<'PY'
+          import ast, pathlib, textwrap, urllib.request, os
           root=pathlib.Path("work-clock"); (root/"src").mkdir(parents=True,exist_ok=True)
-          source=urllib.request.urlopen("https://raw.githubusercontent.com/franciscoBSalgueiro/en-croissant/v0.15.1/src-tauri/src/game.rs").read().decode()
+          source=pathlib.Path(os.environ["GUI_SOURCE"]).read_text() if "GUI_SOURCE" in os.environ else urllib.request.urlopen("https://raw.githubusercontent.com/franciscoBSalgueiro/en-croissant/v0.15.1/src-tauri/src/game.rs").read().decode()
           def method(name):
               marker="    fn "+name+"("
               start=source.index(marker)
@@ -25,7 +30,8 @@ jobs:
               return source[start:end]
           definitions="""use std::{collections::HashMap, time::Instant, sync::Arc};
           use shakmaty::{Chess, Position, Color, EnPassantMode, san::SanPlus, fen::Fen, uci::UciMove};
-          use tokio::sync::{RwLock, oneshot};
+          use tokio::sync::{RwLock, Mutex, oneshot};
+          use dashmap::DashMap;
           use tokio::time::{sleep, Duration};
           type Error = Box<dyn std::error::Error + Send + Sync>;
           #[derive(Clone,Debug,PartialEq)]
@@ -39,23 +45,31 @@ jobs:
           #[derive(Clone,Debug)]
           struct GameMove { uci:String, san:String, fen_after:String, clock:Option<u64>,white_time:Option<u64>,black_time:Option<u64> }
           struct ClockState { white_time:Option<u64>,black_time:Option<u64>,white_increment:u64,black_increment:u64,last_tick:Instant }
-          struct GameController { position:Chess, position_history:HashMap<String,u32>,status:GameStatus,clock:Option<ClockState>,moves:Vec<GameMove> }
+          struct GameController { position:Chess, position_history:HashMap<String,u32>,status:GameStatus,clock:Option<ClockState>,moves:Vec<GameMove>,white_engine:Option<Arc<Mutex<FakeEngine>>>,black_engine:Option<Arc<Mutex<FakeEngine>>> }
+          #[derive(Clone,Debug)]
+          struct EngineLog;
+          struct FakeEngine;
+          impl FakeEngine { fn get_logs(&self)->Vec<EngineLog> { Vec::new() } }
+          struct GameManager { games:DashMap<String,Arc<RwLock<GameController>>> }
           impl Error { }
           """
           definitions=definitions.replace("impl Error { }\n","")
           # The only application-specific error in the copied methods.
           definitions=definitions.replace("type Error = Box<dyn std::error::Error + Send + Sync>;","")
           definitions+="""#[derive(Debug)]
-          enum Error { GameNotInProgress, InvalidMove }
+          enum Error { GameNotInProgress, InvalidMove, GameNotFound(String), InvalidColor(String) }
           impl From<shakmaty::uci::ParseUciMoveError> for Error { fn from(_:shakmaty::uci::ParseUciMoveError)->Self { Self::InvalidMove } }
           impl From<shakmaty::uci::IllegalUciMoveError> for Error { fn from(_:shakmaty::uci::IllegalUciMoveError)->Self { Self::InvalidMove } }
           """
           methods="\n".join(method(n) for n in ["position_key","apply_move","check_game_end","get_current_times"])
+          log_start=source.index("    pub async fn get_engine_logs(")
+          log_end=source.index("\n}\n\nimpl Default for GameManager",log_start)
+          log_method=source[log_start:log_end]
           tests=r"""
           #[tokio::test]
           async fn delayed_black_bestmove_keeps_white_clock_frozen() {
               let mut ctrl = GameController { position:Chess::default(),position_history:HashMap::new(),
-                status:GameStatus::Playing,moves:Vec::new(),
+                status:GameStatus::Playing,moves:Vec::new(),white_engine:None,black_engine:None,
                 clock:Some(ClockState {white_time:Some(1_800_000),black_time:Some(1_800_000),
                   white_increment:2_000,black_increment:5_000,last_tick:Instant::now()}) };
               for mv in ["g1f3","d7d5","f3h4","e7e5","h4f5","b7b6","f5g3"] {
@@ -94,9 +108,37 @@ jobs:
               assert_eq!(bt,black_fixed,"Black clock ran after bestmove");
               assert!(white_start-wt.unwrap()>=100,"White clock did not restart");
           }
+          
+          #[tokio::test]
+          async fn logs_must_not_block_clocks_while_engine_is_delayed() {
+              let engine=Arc::new(Mutex::new(FakeEngine));
+              let held=engine.clone().lock_owned().await;
+              let ctrl=Arc::new(RwLock::new(GameController {position:Chess::default(),
+                  position_history:HashMap::new(),status:GameStatus::Playing,moves:Vec::new(),
+                  clock:None,white_engine:None,black_engine:Some(engine)}));
+              let mgr=Arc::new(GameManager {games:DashMap::new()});
+              mgr.games.insert("test".to_owned(),ctrl.clone());
+              let logger=tokio::spawn({
+                let mgr=mgr.clone();
+                async move { mgr.get_engine_logs("test","black").await.unwrap() }
+              });
+              sleep(Duration::from_millis(50)).await;
+              let result=tokio::time::timeout(Duration::from_millis(100),ctrl.write()).await;
+              if std::env::var("EXPECT_CLOCK_BLOCK").is_ok() {
+                  assert!(result.is_err(),"Original GUI no longer reproduces lock bug");
+                  println!("REPRODUCED: log request blocks clock writes while bestmove is pending");
+              } else {
+                  assert!(result.is_ok(),"Clock blocked while delayed engine holds its lock");
+                  println!("PASS: clock writes remain responsive during delayed engine and log request");
+              }
+              drop(result);
+              drop(held);
+              logger.await.unwrap();
+          }
+          
           """
-          (root/"src/lib.rs").write_text(definitions+"\nimpl GameController {\n"+methods+"\n}\n"+tests)
-          (root/"Cargo.toml").write_text('[package]\nname="clock-regression"\nversion="0.1.0"\nedition="2021"\n[dependencies]\nshakmaty="=0.27.3"\ntokio={version="1",features=["full"]}\n')
+          (root/"src/lib.rs").write_text(definitions+"\nimpl GameController {\n"+methods+"\n}\nimpl GameManager {\n"+log_method+"\n}\n"+tests)
+          (root/"Cargo.toml").write_text('[package]\nname="clock-regression"\nversion="0.1.0"\nedition="2021"\n[dependencies]\nshakmaty="=0.27.3"\ndashmap="6"\ntokio={version="1",features=["full"]}\n')
           # Execute the actual adapter's clock-selection statements, not a reimplementation.
           import chess, types, time
           module=ast.parse(pathlib.Path("engine.py").read_text())
@@ -122,5 +164,12 @@ jobs:
           print("PASS: actual Allie clock selection after Ng3 and asymmetric UCI increments")
           
           PY
-      - name: Delayed bestmove clock regression
+          GUI_SOURCE=gui-check/src-tauri/src/game.rs python clock_check.py
+      - name: Reproduce original log and clock lock bug
+        run: EXPECT_CLOCK_BLOCK=1 cargo test --manifest-path work-clock/Cargo.toml -- --nocapture
+      - name: Apply targeted GUI patch
+        run: |
+          git apply --directory=gui-check ideas/en-croissant-clock.patch
+          GUI_SOURCE=gui-check/src-tauri/src/game.rs python clock_check.py
+      - name: Verify clocks during delayed bestmove after patch
         run: cargo test --manifest-path work-clock/Cargo.toml -- --nocapture
