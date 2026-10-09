@@ -334,6 +334,34 @@ def check_backend():
     return lib
 
 
+def stop_process(process):
+    """Stop and reap a subprocess owned by this test."""
+    import subprocess
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=3)
+
+def exit_with_parent():
+    """Linux: even SIGKILL of a test parent must not orphan a model process."""
+    parent = os.environ.get("ALLIE_TEST_PARENT")
+    if parent is None:
+        return
+    import ctypes
+    import signal
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG)")
+    if os.getppid() != int(parent):
+        os._exit(1)
+
+def test_signal(signum, frame):
+    raise SystemExit(128 + signum)
+
+
 def wait_uci(q, process, prefix, timeout, transcript, output, heartbeat=5):
     import queue
     started = time.monotonic()
@@ -387,6 +415,7 @@ def run_tests():
     
     ROOT = Path(__file__).resolve().parent
     COMMAND = [sys.executable, "-u", str(ROOT / "engine.py")]
+    child_env = dict(os.environ, ALLIE_TEST_PARENT=str(os.getpid()))
     REPORT = ROOT / "test-results"
     REPORT.mkdir(exist_ok=True)
     
@@ -448,7 +477,7 @@ def run_tests():
                             TimeControl="600+5")
         board, node = game.board(), game
         clocks = [600.0, 600.0]
-        allie = chess.engine.SimpleEngine.popen_uci(COMMAND, timeout=600)
+        allie = chess.engine.SimpleEngine.popen_uci(COMMAND, timeout=600, env=child_env)
         sf = None
         searched = 0
         try:
@@ -484,15 +513,16 @@ def run_tests():
             print(f"PASS: complete game {game.headers['Result']}, Rust leaves {searched}",
                   file=engine.OUT, flush=True)
         finally:
-            allie.quit()
+            allie.close()
             if sf:
-                sf.quit()
+                sf.close()
     else:
         # Raw wire test also checks readiness during search and stop.
         transcript = (REPORT / "uci.log").open("w", buffering=1)
         errors = (REPORT / "stderr.log").open("w")
         p = subprocess.Popen(COMMAND, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, text=True, bufsize=1)
+                             stderr=subprocess.PIPE, text=True, bufsize=1, env=child_env,
+                             start_new_session=True)
         q = queue.Queue()
         def reader():
             for line in p.stdout:
@@ -553,16 +583,21 @@ def run_tests():
             print(f"PASS: real model/UCI, Rust leaves={total}, stop={latency:.3f}s",
                   file=engine.OUT, flush=True)
         finally:
-            if p.poll() is None:
-                p.kill()
-                p.wait()
+            stop_process(p)
             stderr_thread.join(timeout=2)
             transcript.close()
             if not stderr_thread.is_alive():
                 errors.close()
     
 if __name__ == "__main__":
+    import signal
+    exit_with_parent()
     if "--unit" in sys.argv or "--test" in sys.argv or "--game" in sys.argv:
-        run_tests()
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, test_signal)
+        try:
+            run_tests()
+        except KeyboardInterrupt:
+            raise SystemExit(130)
     else:
         os._exit(Adapter().run())
