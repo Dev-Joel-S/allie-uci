@@ -66,9 +66,10 @@ nix-build ./ideas/en-croissant-patched.nix -o en-croissant-patched
 ./en-croissant-patched/bin/en-croissant
 ```
 
-Das baut En Croissant aus deinem `<nixpkgs>` mit dem Patch neu. Es benötigt
-En Croissant 0.15.1 in diesem Paketstand und verändert keine vorhandenen
-Store-Dateien. Der erste GUI-Build kann länger dauern. Die gestartete
+Das lädt automatisch den geprüften Nixpkgs-Stand
+`d261affe5e054396f3bf4ec799f304827b7f8b85` und baut dessen En Croissant 0.15.1
+mit dem Patch neu. Es verwendet weder deinen Kanal noch `<nixpkgs>` und verändert
+keine vorhandenen Store-Dateien. Der erste GUI-Build kann länger dauern. Die gestartete
 Anwendung verwendet weiterhin deine vorhandene Allie-Installation.
 Dieser Befehl ersetzt noch keinen Eintrag in deiner NixOS-/Home-Manager-Konfiguration.
 

@@ -1,8 +1,10 @@
-{ pkgs ? import <nixpkgs> {} }:
+{ pkgs ? import (builtins.fetchTarball {
+    url = "https://github.com/NixOS/nixpkgs/archive/d261affe5e054396f3bf4ec799f304827b7f8b85.tar.gz";
+  }) {} }:
 
-# Rebuild En Croissant; never modify a path inside /nix/store.
+# Use the verified package revision independently of the host's NIX_PATH.
 assert pkgs.lib.assertMsg (pkgs.en-croissant.version == "0.15.1")
-  "This patch was tested against En Croissant 0.15.1; your nixpkgs contains a different version.";
+  "The explicitly supplied pkgs must contain En Croissant 0.15.1.";
 pkgs.en-croissant.overrideAttrs (old: {
   patches = (old.patches or []) ++ [ ./en-croissant-clock.patch ];
 })
