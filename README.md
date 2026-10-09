@@ -22,3 +22,7 @@ Der Installer verwendet vorhandene Modellgewichte weiter und baut das Rust-Modul
 neu. Für einen anderen Ordner dem Installer einen absoluten Pfad übergeben.
 
 Elo über `UCI_Elo`, anfängliche Bedenkzeit in Sekunden über `BaseTime` einstellen.
+
+Die INT8-Umwandlung wird beim ersten Modellstart gespeichert. Weitere Starts laden
+den Cache, statt erneut zu quantisieren. Der Cache braucht zusätzlich ungefähr
+6,4 GB Speicherplatz und wird bei geänderten Modellgewichten neu erzeugt.
