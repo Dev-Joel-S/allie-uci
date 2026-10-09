@@ -47,3 +47,41 @@ gebaut werden. `install.sh` installiert den Allie-Adapter und ändert die separa
 installierte GUI nicht. Die konkrete gemeldete Farbvertauschung wurde ohne
 Partie-Logs noch nicht reproduziert; dieser Patch behebt den separat belegten
 Sperrfehler. Ein vollständiger Test der GUI unter NixOS steht aus.
+
+## Elo in En Croissant einstellen
+
+Unter **Engines → Allie → Erweiterte Einstellungen** das Feld **UCI_Elo**
+ändern (800–2600), dann eine neue Partie starten und Allie erneut auswählen.
+Die Einstellung wird dort automatisch gespeichert. Das allgemeine Feld
+**ELO** unter „Allgemeine Einstellungen“ ist nur eine angezeigte Bewertung;
+es steuert die Spielstärke nicht. In der Partieauswahl selbst blendet
+En Croissant 0.15.1 die erweiterten UCI-Optionen aus.
+
+## En Croissant aus dem Nix Store mit Patch bauen
+
+Im heruntergeladenen Repository ausführen:
+
+```sh
+nix-build ./ideas/en-croissant-patched.nix -o en-croissant-patched
+./en-croissant-patched/bin/en-croissant
+```
+
+Das baut En Croissant aus deinem `<nixpkgs>` mit dem Patch neu. Es benötigt
+En Croissant 0.15.1 in diesem Paketstand und verändert keine vorhandenen
+Store-Dateien. Der erste GUI-Build kann länger dauern. Die gestartete
+Anwendung verwendet weiterhin deine vorhandene Allie-Installation.
+Dieser Befehl ersetzt noch keinen Eintrag in deiner NixOS-/Home-Manager-Konfiguration.
+
+## Befund aus ideas/logs.txt
+
+Nach dem weißen `e2g3` (Ng3, 19. Halbzug) sendet die GUI
+`wtime 1641918 btime 1769767 winc 2000 binc 2000`.
+Allie antwortet nach 190305 ms mit `bestmove g7g6`.
+Beim nächsten Suchauftrag beträgt `btime` 1581461 ms:
+188306 ms wurden Schwarz abgezogen, passend zu 190305 ms Suche minus
+2000 ms Inkrement und rund 1 ms weiterer Laufzeit.
+Das bestätigt die schwarze Zeitabrechnung für diesen Zug, aber erklärt
+noch keine falsche Anzeige während der Suche. Weiß hat bis zum nächsten
+Suchauftrag außerdem einen weiteren eigenen Zug gemacht.
+Im gesamten Log fehlt `setoption name UCI_Elo`; die Engine meldet
+den Standardwert 1500.

@@ -173,3 +173,50 @@ jobs:
           GUI_SOURCE=gui-check/src-tauri/src/game.rs python clock_check.py
       - name: Verify clocks during delayed bestmove after patch
         run: cargo test --manifest-path work-clock/Cargo.toml -- --nocapture
+
+  nix-package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=https://github.com/NixOS/nixpkgs/archive/d261affe5e054396f3bf4ec799f304827b7f8b85.tar.gz
+      - name: Evaluate patched Nix package (no full GUI build)
+        run: |
+          nix-instantiate --parse ideas/en-croissant-patched.nix > /dev/null
+          nix-instantiate ideas/en-croissant-patched.nix
+          nix-instantiate --eval --strict --expr 'let p = import ./ideas/en-croissant-patched.nix {}; in assert p.version == "0.15.1"; builtins.map builtins.toString p.patches'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install chess
+      - name: Replay user's actual Ng3 log
+        run: |
+          python - <<'PY'
+          import pathlib, re, chess
+          lines=pathlib.Path("ideas/logs.txt").read_text().splitlines()
+          found=False
+          for i,line in enumerate(lines):
+              if not line.startswith("gui, position "): continue
+              fen,moves=line.removeprefix("gui, position fen ").split(" moves ")
+              board=chess.Board(fen)
+              last_san=None
+              for move in moves.split():
+                  m=chess.Move.from_uci(move)
+                  assert m in board.legal_moves
+                  last_san=board.san(m)
+                  board.push(m)
+              assert board.turn == chess.BLACK
+              if board.ply() != 19 or last_san != "Ng3": continue
+              assert lines[i+1] == "gui, go wtime 1641918 btime 1769767 winc 2000 binc 2000"
+              assert lines[i+2] == "engine, info nodes 4096 time 190305 pv g7g6"
+              assert "engine, bestmove g7g6" in lines[i+3:i+5]
+              next_go=next(l for l in lines[i+2:] if l.startswith("gui, go "))
+              next_black=int(re.search(r"btime (\d+)",next_go).group(1))
+              assert abs((1769767-next_black)-(190305-2000)) <= 5
+              found=True
+          assert found
+          assert "engine, option name UCI_Elo type spin default 1500 min 800 max 2600" in lines
+          assert not any(l.startswith("gui, setoption name UCI_Elo ") for l in lines)
+          print("PASS: all logged positions legal and black to move; real Ng3 search charged to black within 1 ms; no Elo override sent")
+          PY
