@@ -1,0 +1,126 @@
+name: Clock regression
+on: [push]
+permissions:
+  contents: read
+jobs:
+  clocks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install chess
+      - name: Prepare actual-source clock regression
+        run: |
+          python - <<'PY'
+          import ast, pathlib, textwrap, urllib.request
+          root=pathlib.Path("work-clock"); (root/"src").mkdir(parents=True,exist_ok=True)
+          source=urllib.request.urlopen("https://raw.githubusercontent.com/franciscoBSalgueiro/en-croissant/v0.15.1/src-tauri/src/game.rs").read().decode()
+          def method(name):
+              marker="    fn "+name+"("
+              start=source.index(marker)
+              end=source.find("\n    fn ",start+len(marker))
+              if end<0: end=source.index("\n}\n\npub struct GameManager",start)
+              return source[start:end]
+          definitions="""use std::{collections::HashMap, time::Instant, sync::Arc};
+          use shakmaty::{Chess, Position, Color, EnPassantMode, san::SanPlus, fen::Fen, uci::UciMove};
+          use tokio::sync::{RwLock, oneshot};
+          use tokio::time::{sleep, Duration};
+          type Error = Box<dyn std::error::Error + Send + Sync>;
+          #[derive(Clone,Debug,PartialEq)]
+          enum GameEndReason { Checkmate, Timeout }
+          #[derive(Clone,Debug,PartialEq)]
+          enum DrawReason { Stalemate, InsufficientMaterial, ThreefoldRepetition, FiftyMoveRule }
+          #[derive(Clone,Debug,PartialEq)]
+          enum GameResult { WhiteWins { reason: GameEndReason }, BlackWins { reason: GameEndReason }, Draw { reason: DrawReason } }
+          #[derive(Clone,Debug,PartialEq)]
+          enum GameStatus { Playing, Finished { result: GameResult } }
+          #[derive(Clone,Debug)]
+          struct GameMove { uci:String, san:String, fen_after:String, clock:Option<u64>,white_time:Option<u64>,black_time:Option<u64> }
+          struct ClockState { white_time:Option<u64>,black_time:Option<u64>,white_increment:u64,black_increment:u64,last_tick:Instant }
+          struct GameController { position:Chess, position_history:HashMap<String,u32>,status:GameStatus,clock:Option<ClockState>,moves:Vec<GameMove> }
+          impl Error { }
+          """
+          definitions=definitions.replace("impl Error { }\n","")
+          # The only application-specific error in the copied methods.
+          definitions=definitions.replace("type Error = Box<dyn std::error::Error + Send + Sync>;","")
+          definitions+="""#[derive(Debug)]
+          enum Error { GameNotInProgress, InvalidMove }
+          impl From<shakmaty::uci::ParseUciMoveError> for Error { fn from(_:shakmaty::uci::ParseUciMoveError)->Self { Self::InvalidMove } }
+          impl From<shakmaty::uci::IllegalUciMoveError> for Error { fn from(_:shakmaty::uci::IllegalUciMoveError)->Self { Self::InvalidMove } }
+          """
+          methods="\n".join(method(n) for n in ["position_key","apply_move","check_game_end","get_current_times"])
+          tests=r"""
+          #[tokio::test]
+          async fn delayed_black_bestmove_keeps_white_clock_frozen() {
+              let mut ctrl = GameController { position:Chess::default(),position_history:HashMap::new(),
+                status:GameStatus::Playing,moves:Vec::new(),
+                clock:Some(ClockState {white_time:Some(1_800_000),black_time:Some(1_800_000),
+                  white_increment:2_000,black_increment:5_000,last_tick:Instant::now()}) };
+              for mv in ["g1f3","d7d5","f3h4","e7e5","h4f5","b7b6","f5g3"] {
+                  ctrl.apply_move(mv).unwrap();
+              }
+              assert_eq!(ctrl.moves.last().unwrap().san,"Ng3");
+              assert_eq!(ctrl.position.turn(),Color::Black);
+              let (white, black_start)=ctrl.get_current_times();
+              let ctrl=Arc::new(RwLock::new(ctrl));
+              let (tx,rx)=oneshot::channel::<()>();
+              let engine_ctrl=ctrl.clone();
+              let fake_engine=tokio::spawn(async move {
+                  // Delay until the test has observed the clocks while bestmove is pending.
+                  rx.await.unwrap();
+                  engine_ctrl.write().await.apply_move("g8f6").unwrap();
+              });
+              sleep(Duration::from_millis(120)).await;
+              let black_after;
+              {
+                let reading=tokio::time::timeout(Duration::from_millis(100),ctrl.read()).await.unwrap();
+                let (wt,bt)=reading.get_current_times();
+                assert_eq!(wt,white,"White clock ran during black search");
+                black_after=bt.unwrap();
+                assert!(black_start.unwrap()-black_after>=100,"Black clock did not run");
+                assert_eq!(reading.position.turn(),Color::Black);
+              }
+              tx.send(()).unwrap();
+              fake_engine.await.unwrap();
+              let black_fixed=ctrl.read().await.get_current_times().1;
+              assert!(black_fixed.unwrap()>=black_after+4_900,"Black increment missing");
+              let white_start=ctrl.read().await.get_current_times().0.unwrap();
+              sleep(Duration::from_millis(120)).await;
+              let reading=ctrl.read().await;
+              let (wt,bt)=reading.get_current_times();
+              assert_eq!(reading.position.turn(),Color::White);
+              assert_eq!(bt,black_fixed,"Black clock ran after bestmove");
+              assert!(white_start-wt.unwrap()>=100,"White clock did not restart");
+          }
+          """
+          (root/"src/lib.rs").write_text(definitions+"\nimpl GameController {\n"+methods+"\n}\n"+tests)
+          (root/"Cargo.toml").write_text('[package]\nname="clock-regression"\nversion="0.1.0"\nedition="2021"\n[dependencies]\nshakmaty="=0.27.3"\ntokio={version="1",features=["full"]}\n')
+          # Execute the actual adapter's clock-selection statements, not a reimplementation.
+          import chess, types, time
+          module=ast.parse(pathlib.Path("engine.py").read_text())
+          adapter=next(n for n in module.body if isinstance(n,ast.ClassDef) and n.name=="Adapter")
+          search=next(n for n in adapter.body if isinstance(n,ast.FunctionDef) and n.name=="search")
+          block=[]
+          for stmt in search.body:
+              if isinstance(stmt,ast.ImportFrom) or isinstance(stmt,ast.Import): continue
+              if isinstance(stmt,ast.Assign) and any(isinstance(t,ast.Name) and t.id=="inc" for t in stmt.targets): break
+              block.append(stmt)
+          board=chess.Board()
+          for mv in ["g1f3","d7d5","f3h4","e7e5","h4f5","b7b6","f5g3"]: board.push_uci(mv)
+          assert board.turn==chess.BLACK
+          namespace=dict(self=types.SimpleNamespace(board=board),
+           values=dict(wtime=1_700_000,btime=1_800_000,winc=2_000,binc=5_000),
+           flags=set(),OPTIONS=dict(moveoverhead=[100]),chess=chess,time=time)
+          exec(compile(ast.fix_missing_locations(ast.Module(body=block,type_ignores=[])),"engine.py","exec"),namespace)
+          assert namespace["side"]==1
+          assert namespace["clocks"]==[1700.,1800.]
+          assert namespace["incs"]==[2.,5.]
+          assert namespace["clock"]==1800.
+          assert namespace["allowed"]==1799.9
+          print("PASS: actual Allie clock selection after Ng3 and asymmetric UCI increments")
+          
+          PY
+      - name: Delayed bestmove clock regression
+        run: cargo test --manifest-path work-clock/Cargo.toml -- --nocapture
