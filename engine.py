@@ -73,6 +73,110 @@ def limits(args):
         raise ValueError("searchmoves is unsupported by this calibrated bridge")
     return values, flags
 
+def load_int8_model(module, path, cache_dir, torch, **kwargs):
+    """Reuse quantized tensors; keep upstream initialization and Rust backend intact."""
+    import fcntl
+    import hashlib
+    import json
+    import pickle
+    import tempfile
+    path, cache_dir = Path(path), Path(cache_dir)
+    weights = path / "model.safetensors"
+    stat = weights.stat()
+    with weights.open("rb") as stream:
+        length = int.from_bytes(stream.read(8), "little")
+        if not 0 < length <= 16 * 1024 * 1024:
+            raise ValueError("Invalid safetensors header")
+        header = json.loads(stream.read(length))
+    header.pop("__metadata__", None)
+    identity = dict(format=1, torch=str(torch.__version__),
+                    source=hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest(),
+                    config=hashlib.sha256((path / "config.json").read_bytes()).hexdigest(),
+                    path=str(weights.resolve()), size=stat.st_size,
+                    mtime=stat.st_mtime_ns, header=header)
+    key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
+    cache = cache_dir / f"model-int8-{key}.pt"
+    started = time.monotonic()
+    def validate(data):
+        if not isinstance(data, dict) or data.get("identity") != identity:
+            raise ValueError("Cache metadata mismatch")
+        tensors = data.get("tensors")
+        if not isinstance(tensors, dict) or set(tensors) != set(header):
+            raise ValueError("Cache tensor names mismatch")
+        dtypes = dict(BF16=torch.bfloat16, F16=torch.float16,
+                      F32=torch.float32, I8=torch.int8)
+        for name, h in header.items():
+            value = tensors[name]
+            if name.split(".")[-1] in module.MATRICES:
+                if not isinstance(value, tuple) or len(value) != 2:
+                    raise ValueError("Invalid quantized cache tensor: " + name)
+                q, scales = value
+                if (not isinstance(q, torch.Tensor) or not isinstance(scales, torch.Tensor)
+                    or list(q.shape) != h["shape"] or q.dtype != torch.int8
+                    or list(scales.shape) != h["shape"][:-1]
+                    or scales.dtype != torch.bfloat16):
+                    raise ValueError("Invalid cache shape or dtype: " + name)
+            elif (not isinstance(value, torch.Tensor)
+                  or list(value.shape) != h["shape"] or value.dtype != dtypes[h["dtype"]]):
+                raise ValueError("Invalid cache tensor: " + name)
+        return tensors
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    with (cache_dir / "model-int8.lock").open("a") as lock:
+        send("info string Warte auf INT8-Cache")
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        tensors = None
+        if cache.exists():
+            try:
+                tensors = validate(torch.load(cache, mmap=True, weights_only=True))
+            except (OSError, ValueError, RuntimeError, EOFError, pickle.UnpicklingError) as exc:
+                send("info string INT8-Cache ungueltig; berechne neu: " + str(exc))
+        original_read, original_quantize = module.read, module.quantize
+        saved, last = {}, [None]
+        if tensors is not None:
+            send("info string Lade gespeicherte INT8-Gewichte")
+            module.read = lambda _: iter(tensors.items())
+            module.quantize = lambda value: value
+        else:
+            send("info string Erste INT8-Umwandlung; wird fuer weitere Starts gespeichert")
+            count = [0]
+            def read(filename):
+                for name, value in original_read(filename):
+                    last[0] = name
+                    if name.split(".")[-1] not in module.MATRICES:
+                        saved[name] = value
+                    yield name, value
+            def quantize(value):
+                result = original_quantize(value)
+                saved[last[0]] = result
+                count[0] += 1
+                if count[0] % 10 == 0:
+                    send(f"info string INT8: {count[0]} Matrizen umgewandelt")
+                return result
+            module.read, module.quantize = read, quantize
+        try:
+            model = module.Model(path, **kwargs)
+        finally:
+            module.read, module.quantize = original_read, original_quantize
+        if tensors is None:
+            data = dict(identity=identity, tensors=saved)
+            validate(data)
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(dir=cache_dir, prefix="model-int8-",
+                                                 suffix=".tmp", delete=False) as stream:
+                    temporary = Path(stream.name)
+                    torch.save(data, stream)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, cache)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+        state = "geladen" if tensors is not None else "berechnet und gespeichert"
+        send(f"info string INT8 {state} in {time.monotonic()-started:.1f}s")
+        return model
+
+
 class Adapter:
     def __init__(self):
         self.board, self.moves = chess.Board(), []
@@ -91,7 +195,7 @@ class Adapter:
         check_backend()
         import torch
         import allie_fast
-        from allie.lichess.model import Model
+        import allie.lichess.model as model_module
         from allie.lichess.fastrs import RustFast
         from allie.lichess.engine import Engine
         from allie.lichess.treers import KL
@@ -102,8 +206,9 @@ class Adapter:
         torch.set_num_threads(threads)
         path = Path(__file__).with_name("model-path.txt").read_text().strip()
         send("info string Lade Modellgewichte und quantisiere INT8; das kann dauern")
-        model = Model(path, device="cpu", dtype=torch.bfloat16,
-                      int8=True, backend="rust", threads=threads)
+        model = load_int8_model(model_module, path, Path(__file__).resolve().parent,
+                                torch, device="cpu", dtype=torch.bfloat16,
+                                int8=True, backend="rust", threads=threads)
         send("info string Modell geladen; initialisiere Calibrated-Suche")
         if not isinstance(model.fast, RustFast):
             raise RuntimeError("Calibrated mode requires the Rust backend")
