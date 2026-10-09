@@ -87,6 +87,7 @@ class Adapter:
     def load(self):
         if self.engine is not None:
             return
+        send("info string Lade Rust-Modul und PyTorch")
         check_backend()
         import torch
         import allie_fast
@@ -100,8 +101,10 @@ class Adapter:
         threads = int(os.environ.get("ALLIE_THREADS", min(8, os.cpu_count() or 1)))
         torch.set_num_threads(threads)
         path = Path(__file__).with_name("model-path.txt").read_text().strip()
+        send("info string Lade Modellgewichte und quantisiere INT8; das kann dauern")
         model = Model(path, device="cpu", dtype=torch.bfloat16,
                       int8=True, backend="rust", threads=threads)
+        send("info string Modell geladen; initialisiere Calibrated-Suche")
         if not isinstance(model.fast, RustFast):
             raise RuntimeError("Calibrated mode requires the Rust backend")
         torch.set_num_threads(1)
@@ -331,6 +334,42 @@ def check_backend():
     return lib
 
 
+def wait_uci(q, process, prefix, timeout, transcript, output, heartbeat=5):
+    import queue
+    started = time.monotonic()
+    end = started + timeout
+    next_status = started + heartbeat
+    lines = []
+    while True:
+        now = time.monotonic()
+        if now >= end:
+            raise TimeoutError(
+                f"Keine Antwort {prefix!r} nach {timeout}s; "
+                f"Prozesscode={process.poll()}. Siehe test-results/stderr.log")
+        try:
+            line = q.get(timeout=min(1, end - now))
+        except queue.Empty:
+            now = time.monotonic()
+            if now >= next_status:
+                print(f"Warte auf {prefix.strip()}: {now-started:.0f}s; "
+                      f"Prozess {'läuft' if process.poll() is None else 'beendet'}",
+                      file=output, flush=True)
+                next_status = now + heartbeat
+            continue
+        if line is None:
+            raise AssertionError(
+                f"Engine beendet (code={process.poll()}); letzte Ausgabe={lines[-8:]}; "
+                "siehe test-results/stderr.log")
+        transcript.write("< " + line + "\n")
+        lines.append(line)
+        if line.startswith(("info string", "info nodes", "bestmove")):
+            print(line, file=output, flush=True)
+        if line.startswith("info string ERROR"):
+            raise RuntimeError(line + "; siehe test-results/stderr.log")
+        if line.startswith(prefix):
+            return lines
+
+
 def run_tests():
     import logging
     import os
@@ -376,6 +415,27 @@ def run_tests():
     print("PASS: position parsing, castling, en passant, promotion, mate, clocks",
           file=engine.OUT, flush=True)
     if "--unit" in sys.argv:
+        import io
+        class Process:
+            def poll(self):
+                return None
+        for received, expected in [
+            (["readyok"], None),
+            (["info string ERROR backend kaputt"], RuntimeError),
+            ([None], AssertionError),
+            ([], TimeoutError),
+        ]:
+            responses = queue.Queue()
+            for line in received:
+                responses.put(line)
+            try:
+                result = wait_uci(responses, Process(), "readyok", 0.03,
+                                  io.StringIO(), io.StringIO())
+                assert expected is None and result == ["readyok"]
+            except (RuntimeError, AssertionError, TimeoutError) as exc:
+                assert expected is not None and isinstance(exc, expected), str(exc)
+        print("PASS: UCI wait, backend errors, process exit, timeout",
+              file=engine.OUT, flush=True)
         return
     
     logging.basicConfig(filename=REPORT / "python-chess.log", level=logging.DEBUG,
@@ -432,12 +492,19 @@ def run_tests():
         transcript = (REPORT / "uci.log").open("w", buffering=1)
         errors = (REPORT / "stderr.log").open("w")
         p = subprocess.Popen(COMMAND, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=errors, text=True, bufsize=1)
+                             stderr=subprocess.PIPE, text=True, bufsize=1)
         q = queue.Queue()
         def reader():
             for line in p.stdout:
                 q.put(line.strip())
             q.put(None)
+        def error_reader():
+            for line in p.stderr:
+                errors.write(line)
+                errors.flush()
+                print(line.rstrip(), file=engine.OUT, flush=True)
+        stderr_thread = threading.Thread(target=error_reader, daemon=True)
+        stderr_thread.start()
         threading.Thread(target=reader, daemon=True).start()
         def send(s):
             transcript.write("> " + s + "\n")
@@ -447,27 +514,18 @@ def run_tests():
             except BrokenPipeError as exc:
                 raise AssertionError(f"Engine pipe closed; see {REPORT / 'stderr.log'}") from exc
         def until(prefix, timeout=120):
-            lines, end = [], time.monotonic() + timeout
-            while True:
-                line = q.get(timeout=max(0.01, end - time.monotonic()))
-                if line is None:
-                    raise AssertionError(f"Engine exited (code={p.poll()}); received={lines}; "
-                                         f"see {REPORT / 'stderr.log'}")
-                transcript.write("< " + line + "\n")
-                lines.append(line)
-                if line.startswith(prefix):
-                    return lines
-                if time.monotonic() >= end:
-                    raise TimeoutError(prefix)
+            return wait_uci(q, p, prefix, timeout, transcript, engine.OUT)
         try:
             send("uci")
             until("uciok")
+            print("Lade echte Allie-Engine (Zeitlimit 600s)...", file=engine.OUT, flush=True)
             send("isready")
             until("readyok", 600)
             send("ucinewgame")
             send("setoption name UCI_Elo value 1800")
             total = 0
-            for _ in range(4):
+            for test_number in range(1, 5):
+                print(f"Teste Rust-Suche {test_number}/4...", file=engine.OUT, flush=True)
                 send("position fen " + chess.STARTING_FEN + " moves e2e4 e7e5 g1f3 b8c6")
                 send("go wtime 180000 btime 180000 winc 2000 binc 2000 movetime 5000")
                 lines = until("bestmove ")
@@ -498,8 +556,10 @@ def run_tests():
             if p.poll() is None:
                 p.kill()
                 p.wait()
+            stderr_thread.join(timeout=2)
             transcript.close()
-            errors.close()
+            if not stderr_thread.is_alive():
+                errors.close()
     
 if __name__ == "__main__":
     if "--unit" in sys.argv or "--test" in sys.argv or "--game" in sys.argv:
