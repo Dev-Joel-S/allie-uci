@@ -1,7 +1,10 @@
 diff --git a/src-tauri/src/game.rs b/src-tauri/src/game.rs
 --- a/src-tauri/src/game.rs
 +++ b/src-tauri/src/game.rs
-@@ -830,9 +830,10 @@
+@@ -827,15 +827,16 @@
+             .get(game_id)
+             .ok_or_else(|| Error::GameNotFound(game_id.to_string()))?;
+ 
 -        let controller = game.read().await;
 -
 -        let engine = match color {
@@ -21,3 +24,6 @@ diff --git a/src-tauri/src/game.rs b/src-tauri/src/game.rs
 +        }; // Release the game lock before waiting for a thinking engine.
 +
 +        if let Some(engine_arc) = engine {
+             let engine = engine_arc.lock().await;
+             Ok(engine.get_logs())
+         } else {
